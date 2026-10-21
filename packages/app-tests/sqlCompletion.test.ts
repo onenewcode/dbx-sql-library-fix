@@ -20,6 +20,7 @@ import {
 } from "../../apps/desktop/src/lib/sql/sqlCompletion.ts";
 import { sqlCompletionContextFromSemantic } from "../../apps/desktop/src/lib/sql/semantic/completion.ts";
 import { buildSqlSemanticModel } from "../../apps/desktop/src/lib/sql/semantic/model.ts";
+import { sqlSnippetDatabaseTypeForConnection } from "../../apps/desktop/src/lib/database/jdbcDialect.ts";
 import type { DatabaseType } from "../../apps/desktop/src/types/database.ts";
 
 const tables: SqlCompletionTable[] = [
@@ -316,6 +317,41 @@ test("suggests MySQL VERSION and REVERSE without broadening other dialects", () 
     false,
   );
   assert.equal(buildFunctionItems("reve").find((item) => item.label === "REVERSE")?.apply, "REVERSE(${string})");
+});
+
+test("suggests MySQL AES functions with required arguments, including through JDBC MySQL", () => {
+  const jdbcMysqlType = sqlSnippetDatabaseTypeForConnection({ db_type: "jdbc", connection_string: "jdbc:mysql://localhost:3306/app" });
+  assert.equal(jdbcMysqlType, "mysql");
+
+  for (const databaseType of ["mysql", jdbcMysqlType] as const) {
+    for (const [name, parameters] of [
+      ["AES_ENCRYPT", ["str", "key_str"]],
+      ["AES_DECRYPT", ["crypt_str", "key_str"]],
+    ] as const) {
+      const sql = `SELECT ${name.slice(0, -3)}`;
+      const items = buildSqlCompletionItems(sql, sql.length, {
+        tables: [],
+        columnsByTable: new Map(),
+        databaseType,
+      });
+      assert.equal(items.find((item) => item.type === "function" && item.label === name)?.apply, `${name}(${parameters.map((parameter) => `\${${parameter}}`).join(", ")})`);
+      const call = `SELECT ${name}(`;
+      assert.deepEqual(getSqlFunctionSignatureHelp(call, call.length, databaseType)?.parameters, parameters);
+    }
+  }
+
+  for (const databaseType of ["postgres", "sqlserver"] as const) {
+    const sql = "SELECT AES_";
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      tables: [],
+      columnsByTable: new Map(),
+      databaseType,
+    });
+    assert.equal(
+      items.some((item) => item.type === "function" && (item.label === "AES_ENCRYPT" || item.label === "AES_DECRYPT")),
+      false,
+    );
+  }
 });
 
 test("suggests the reported MySQL 5.7 built-in functions with dialect-specific signatures", () => {
@@ -2085,7 +2121,10 @@ test("prioritizes UNIQUEIDENTIFIER above UNION and UPDATE and suppresses externa
   });
 
   // Should NOT suggest columns from other tables when defining column types
-  assert.equal(items.some((item) => item.label === "UpdateDate"), false);
+  assert.equal(
+    items.some((item) => item.label === "UpdateDate"),
+    false,
+  );
 
   // UNIQUEIDENTIFIER must rank above UNION and UPDATE
   const uniqueIdIdx = items.findIndex((item) => item.label === "UNIQUEIDENTIFIER");
@@ -3532,6 +3571,36 @@ test("referenced-table columns rank above keywords (#801)", () => {
   }
 });
 
+test("referenced-table columns rank above sequences in WHERE clause (#12927)", () => {
+  for (const databaseType of ["dameng", "oracle"] as const) {
+    const sql = "select * from xx where col";
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      tables: [{ name: "xx", type: "table" }],
+      columnsByTable: new Map([["xx", [{ name: "col_value", table: "xx" }]]]),
+      objects: [{ name: "col_seq", type: "sequence" }],
+      databaseType,
+    });
+
+    const columnIdx = items.findIndex((item) => item.type === "column" && item.label === "col_value");
+    const sequenceIdx = items.findIndex((item) => item.type === "sequence" && item.label === "col_seq");
+
+    assert.ok(columnIdx >= 0, `column col_value should be suggested for ${databaseType}`);
+    assert.ok(sequenceIdx >= 0, `sequence col_seq should be suggested for ${databaseType}`);
+    assert.ok(columnIdx < sequenceIdx, `column col_value (index ${columnIdx}) should sort before sequence col_seq (index ${sequenceIdx}) for ${databaseType}`);
+
+    // In contexts where columns are not expected, sequence still appears and retains priority
+    const noTableSql = "select col";
+    const noTableItems = buildSqlCompletionItems(noTableSql, noTableSql.length, {
+      tables: [],
+      columnsByTable: new Map(),
+      objects: [{ name: "col_seq", type: "sequence" }],
+      databaseType,
+    });
+    const noTableSeqIdx = noTableItems.findIndex((item) => item.type === "sequence" && item.label === "col_seq");
+    assert.equal(noTableSeqIdx, 0, `sequence col_seq should rank first when columns are not expected for ${databaseType}`);
+  }
+});
+
 // --- Schema name completion ---
 
 test("suggests schema names alongside tables in FROM context", () => {
@@ -4847,9 +4916,7 @@ test("schema-qualified table completions follow identifierCase (#11400)", () => 
 });
 
 test("table completions with applyName follow identifierCase (#11400)", () => {
-  const tablesWithApplyName = [
-    { name: "DEPT_DICT", schema: "COMM", applyName: "COMM.DEPT_DICT", type: "table" as const },
-  ];
+  const tablesWithApplyName = [{ name: "DEPT_DICT", schema: "COMM", applyName: "COMM.DEPT_DICT", type: "table" as const }];
   const items = buildSqlCompletionItems("select * from d", "select * from d".length, {
     tables: tablesWithApplyName,
     columnsByTable: new Map(),
@@ -4900,7 +4967,10 @@ test("table and column completions can be searched by comments (#12033)", () => 
     databaseType: "mysql",
   });
   assert.ok(hanTableItems.some((item) => item.label === "t_user"));
-  assert.equal(hanTableItems.some((item) => item.label === "t_order"), false);
+  assert.equal(
+    hanTableItems.some((item) => item.label === "t_order"),
+    false,
+  );
 
   // Table matching by pinyin initials of comment
   const pinyinTableItems = buildSqlCompletionItems("select * from ddb", "select * from ddb".length, {
@@ -4964,4 +5034,3 @@ test("table and column completions can be searched by comments (#12033)", () => 
   assert.ok(userLogIndex >= 0 && historyIndex >= 0);
   assert.ok(userLogIndex < historyIndex, "Name match should rank ahead of comment match");
 });
-
