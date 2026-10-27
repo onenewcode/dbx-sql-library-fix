@@ -10,7 +10,7 @@ export function syncSidebarTreeNodeExpansion(nodes: readonly TreeNode[], rendere
   if (!expanded) {
     collapseSubtreeDescendants(liveNode);
   }
-  if (liveNode.isExpanded === expanded) return false;
+  if (liveNode === renderedNode || liveNode.isExpanded === expanded) return false;
   liveNode.isExpanded = expanded;
   return true;
 }
