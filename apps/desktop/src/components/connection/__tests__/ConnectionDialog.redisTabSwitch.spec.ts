@@ -1,9 +1,10 @@
 // @vitest-environment happy-dom
 
-import { createApp, defineComponent, h, nextTick, reactive, type App } from "vue";
+import { createApp, defineComponent, h, nextTick, type App } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import i18n from "@/i18n";
 import type { ConnectionConfig } from "@/types/database";
+import { TooltipProvider } from "@/components/ui/tooltip";
 
 const { store, settings, backend } = vi.hoisted(() => ({
   store: {
@@ -34,7 +35,7 @@ const { store, settings, backend } = vi.hoisted(() => ({
     connectDb: vi.fn(),
     disconnectDb: vi.fn(),
     testConnectionWithInfo: vi.fn().mockResolvedValue({ ok: true, message: "Connected successfully" }),
-    listDatabases: vi.fn(),
+    listDatabases: vi.fn().mockResolvedValue([]),
     listPlugins: vi.fn().mockResolvedValue([]),
     listJdbcDrivers: vi.fn().mockResolvedValue([]),
     listJdbcMavenBundles: vi.fn().mockResolvedValue([]),
@@ -42,6 +43,7 @@ const { store, settings, backend } = vi.hoisted(() => ({
     listSshConfigHosts: vi.fn().mockResolvedValue([]),
     listInstalledAgentsLocal: vi.fn().mockResolvedValue([]),
     listenAgentInstallProgress: vi.fn(),
+    redisListDatabases: vi.fn().mockResolvedValue([]),
   },
 }));
 
@@ -51,36 +53,6 @@ vi.mock("@/stores/tunnelProfileStore", () => ({ useTunnelProfileStore: () => ({ 
 vi.mock("@/lib/backend/api", async (original) => ({ ...(await original<typeof import("@/lib/backend/api")>()), ...backend }));
 vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
 vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: vi.fn() }) }));
-
-vi.mock("@/components/ui/tooltip", async () => {
-  const { defineComponent, h } = await import("vue");
-  const pass = defineComponent({
-    setup:
-      (_props, { slots }) =>
-      () =>
-        h("div", slots.default?.()),
-  });
-  return { Tooltip: pass, TooltipContent: pass, TooltipProvider: pass, TooltipTrigger: pass, HelpTooltip: pass };
-});
-
-vi.mock("@/components/ui/dialog", async () => {
-  const { defineComponent, h } = await import("vue");
-  const passthrough = defineComponent({
-    setup:
-      (_props, { slots }) =>
-      () =>
-        h("div", slots.default?.()),
-  });
-  const Dialog = defineComponent({
-    props: { open: Boolean },
-    emits: ["update:open"],
-    setup:
-      (props, { slots }) =>
-      () =>
-        props.open ? h("section", slots.default?.()) : null,
-  });
-  return { Dialog, DialogContent: passthrough, DialogHeader: passthrough, DialogTitle: passthrough, DialogFooter: passthrough };
-});
 
 import ConnectionDialog from "../ConnectionDialog.vue";
 
@@ -105,7 +77,7 @@ describe("ConnectionDialog Redis editing (#13826)", () => {
     document.body.appendChild(container);
     app = createApp({
       setup() {
-        return () => h(ConnectionDialog, { open: true, editConfig: config });
+        return () => h(TooltipProvider, () => h(ConnectionDialog, { open: true, editConfig: config }));
       },
     });
     app.use(i18n);
@@ -173,6 +145,66 @@ describe("ConnectionDialog Redis editing (#13826)", () => {
         port: 6379,
       }),
     );
+  });
+
+  it("switches tabs without recursive update loop when editing redis connection with saved database_info (#13826)", async () => {
+    const configWithDbInfo: ConnectionConfig = {
+      id: "redis-existing",
+      name: "Existing Redis",
+      db_type: "redis",
+      driver_profile: "redis",
+      driver_label: "Redis",
+      host: "127.0.0.1",
+      port: 6379,
+      database: "0",
+      database_info: {
+        serverVersion: "7.2.4",
+        productName: "Redis",
+      },
+    };
+
+    await mountDialog(configWithDbInfo);
+
+    const triggers = () => [...document.querySelectorAll('[data-slot="tabs-trigger"]')];
+    const advancedTrigger = triggers().find((t) => t.textContent?.includes("Advanced") || t.textContent?.includes("高级"));
+    expect(advancedTrigger).toBeTruthy();
+
+    advancedTrigger!.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+    await nextTick();
+    await nextTick();
+
+    expect(document.querySelector('[data-slot="tabs-trigger"][data-state="active"]')?.textContent).toContain("Advanced");
+
+    // Click Test while on Advanced tab
+    const testButton = [...document.querySelectorAll("button")].find((b) => b.textContent?.trim() === "Test" || b.textContent?.trim() === "测试");
+    expect(testButton).toBeTruthy();
+    testButton!.click();
+    await vi.waitFor(() => expect(backend.testConnectionWithInfo).toHaveBeenCalledOnce());
+
+    // Switch back to Basic tab
+    const basicTrigger = triggers().find((t) => t.textContent?.includes("Connection") || t.textContent?.includes("基础"));
+    expect(basicTrigger).toBeTruthy();
+    basicTrigger!.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+    await nextTick();
+    await nextTick();
+
+    expect(document.querySelector('[data-slot="tabs-trigger"][data-state="active"]')?.textContent).toContain("Connection");
+
+    // Switch to Tunnel tab
+    const tunnelTrigger = triggers().find((t) => t.textContent?.includes("Tunnel") || t.textContent?.includes("隧道"));
+    expect(tunnelTrigger).toBeTruthy();
+    tunnelTrigger!.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+    await nextTick();
+    await nextTick();
+
+    expect(document.querySelector('[data-slot="tabs-trigger"][data-state="active"]')?.textContent).toContain("Tunnel");
+
+    // Click Save while on Tunnel tab
+    const saveButton = [...document.querySelectorAll("button")].find((b) => b.textContent?.trim() === "Save" || b.textContent?.trim() === "保存");
+    expect(saveButton).toBeTruthy();
+    saveButton!.click();
+
+    await vi.waitFor(() => expect(store.updateConnection).toHaveBeenCalledOnce());
   });
 
   it("tests connection without crashing when username is undefined", async () => {
