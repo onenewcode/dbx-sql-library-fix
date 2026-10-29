@@ -5061,10 +5061,12 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
   // be significant, and file-path hosts (SQLite/DuckDB/H2 file mode) keep
   // their exact value for the same reason.
   const usesLocalFilePathHost = isLocalFileTypeDb(config.db_type) && (config.db_type !== "h2" || h2ConnectionModeForConfig(config) === "file");
-  if (!usesLocalFilePathHost) {
+  if (!usesLocalFilePathHost && typeof config.host === "string") {
     config.host = config.host.trim();
   }
-  config.username = config.username.trim();
+  if (typeof config.username === "string") {
+    config.username = config.username.trim();
+  }
   config.database = config.database?.trim() || undefined;
   if (isCloudflareD1Connection(config)) {
     normalizeCloudflareD1Connection(config);
@@ -5832,7 +5834,7 @@ function parseEtcdEndpoint(value: string): { scheme?: string; host: string; port
 }
 
 function isOracleSysUser(config: Pick<ConnectionConfig, "db_type" | "username">): boolean {
-  return config.db_type === "oracle" && config.username.trim().toLowerCase() === "sys";
+  return config.db_type === "oracle" && typeof config.username === "string" && config.username.trim().toLowerCase() === "sys";
 }
 
 function resetTestState() {
